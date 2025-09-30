@@ -1,0 +1,1 @@
+{"bloom_device_NVIDIA_MIG_1g_GPU_dtype_bfloat16": {"inference_rps": 61.62423713004905, "forward_rps": 2734.9294575188906, "network_rps": 1636.225130062161}, "bloom_device_NVIDIA_A100_80GB_PCIe_GPU_dtype_bfloat16": {"inference_rps": 373.72158712794413, "forward_rps": 20575.644111628837, "network_rps": 2555.208925125856}}

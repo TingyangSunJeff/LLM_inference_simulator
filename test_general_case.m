@@ -1,0 +1,194 @@
+% General case:
+
+% cluster size and demand:
+n_client = 1;
+n_request_client = 3; % #requests per client
+R = n_client*n_request_client; % total #requests
+n_local_server = 7; % MIG instances 
+n_remote_server = 2; % A100
+n_server = n_local_server + n_remote_server;
+% delay-related parameters: all delays are measured in 'ms'
+overhead_delay = 25; % additional delay beyond raw RTT (measured by 'ping'); include both serialization overhead and data transfer time in both directions to send/receive one embedding (measured by us)
+local_rtt_min = 0; % RTT for local connection: uniformly distributed in [local_rtt_min,local_rtt_max]
+local_rtt_max = 5;
+remote_rtt_min = 100; % RTT for remote connection: uniformly distributed in [remote_rtt_min,remote_rtt_max]
+remote_rtt_max = 200; 
+rttfile = ['data/rtt_general_' num2str(n_client) 'client_' num2str(n_local_server) 'localserver_' num2str(n_remote_server) 'remoteserver.mat']; % file storing the pre-generated RTTs (for fair comparison across different workloads specified by n_client, n_request_client, lc)
+if ~isfile(rttfile) % generate RTT values for the first time of use:
+    RTT = zeros(n_client,n_server); % RTT(c,j): RTT between client c and server j for sending and receiving one embedding (in 'ms')
+    RTT(:,1:n_local_server) = overhead_delay+local_rtt_min+(local_rtt_max-local_rtt_min).*rand(n_client,n_local_server); % unit: 'ms'
+    RTT(:,n_local_server+1:n_server) = overhead_delay+remote_rtt_min+(remote_rtt_max-remote_rtt_min).*rand(n_client,n_remote_server); % the extra 25 ms is the comm. overhead
+    RTT_raw = zeros(n_client+n_server); % raw RTT (measured by 'ping'); used by Petals only; nodes 1,...,n_client are clients, nodes n_client+1,...n_client+n_server are servers
+    RTT_raw(1:n_client,n_client+[1:n_local_server]) = RTT(:,1:n_local_server) - overhead_delay; % client-local server raw RTT
+    RTT_raw(1:n_client,n_client+[n_local_server+1:n_server]) = RTT(:,n_local_server+1:n_server) - overhead_delay; % client-remote server raw RTT
+    RTT_raw(n_client+[1:n_server],n_client+[1:n_server]) = remote_rtt_min+(remote_rtt_max-remote_rtt_min).*rand(n_server,n_server); % local server to remote server raw RTT; around 'remote_rtt'
+    RTT_raw(n_client+[1:n_local_server],n_client+[1:n_local_server]) = local_rtt_min+(local_rtt_max-local_rtt_min).*rand(n_local_server,n_local_server); % local server to local server raw RTT; around 'local_rtt'
+    RTT_raw(n_client+[n_local_server+1:n_server],n_client+[n_local_server+1:n_server]) = local_rtt_min+(local_rtt_max-local_rtt_min).*rand(n_remote_server,n_remote_server); % remote server to remote server raw RTT; also around 'local_rtt'
+    for i=1:n_server-1
+        for j=i+1:n_server
+            RTT_raw(n_client+j,n_client+i) = RTT_raw(n_client+i,n_client+j);
+        end
+    end % make server-server RTTs symmetric (Note: only RTT_raw(client,server) and RTT_raw(server,server) are used; client-client RTT and self-RTT values are not set)
+    save(rttfile, "RTT","RTT_raw");
+else % use pregenerated RTT values:
+    load(rttfile); % RTT, RTT_raw
+end
+% the following parameters and RTT_raw are needed by Petals only:
+    overhead_delay_petals = 18; % serialization overhead by Petals (in ms)
+    alloc_delay = 10000; % delay penalty if not enough cache space
+    throughput = zeros(n_server,1); % 'throughput' estimated by Petals
+    throughput(n_local_server+1:n_server) = 770.96; % remote server's throughput
+    throughput(1:n_local_server) = throughput(n_server)/7; % local server's throughput
+% end of parameters needed by Petals only.
+tau = zeros(n_server,1); % per-block inference time in 'ms'; given by 1000/inference_rps
+tau(1:n_local_server) = 15; % local server's inference time
+tau(n_local_server+1:n_server) = 15/7; % remote server's inference time
+% memory-related parameters:
+M = zeros(n_server,1); % GPU capacity (GB)
+M(1:n_local_server) = 9.5; 
+M(n_local_server+1:n_server) = 79.138427734375;
+% model-related parameters:
+model = 'BLOOM-176B'; 
+switch model
+    case 'BLOOM-176B'
+        L = 70; % total #blocks (layers in the LLM)
+        n_parameters = 2.466437120; % #parameters per block (in billion)
+        d_model = 14336; % dimension per embedding
+        lmax = 2048; % max sequence length (including input tokens)
+    case 'BLOOM-7B'
+        L = 30;
+        n_parameters = 0.23; % billion
+        d_model = 4096;
+        lmax = 2048; 
+    otherwise
+        error(['unsupported model: ' model]);
+end
+lc = 100; % 20; % #tokens per request
+bytes_per_value = 4.25 / 8; %nf4
+sm = n_parameters * bytes_per_value * 1.01; % size of each block (GB); assuming 4-bit precision (e.g., nf4)
+sc = 2*d_model*lc*2/2^30; % size of each attention cache (per block per session) (GB)
+
+
+% check feasibility:
+% tmp_m = floor(M./sm); % maximum #blocks per server
+tmp_m = zeros(n_server,1);
+for i=1:n_server 
+    tmp_m(i) = choose_num_blocks_proposed(M(i),sm,sc,R, L);
+end
+tmp_sessions = floor((M-sm.*tmp_m)./(sc.*tmp_m)); % lower bound on #sessions each server can handle
+if sum(tmp_m) < L || sum(tmp_sessions.*tmp_m) < R*L % 'sum(tmp_sessions.*tmp_m)': total #attention caches the servers can hold after storing the maximum #blocks per server (each session requires one such cache per processed block); 'R*L' is the total number of attention caches needed to process R sessions
+    error(['test_general_case: Insufficient capacity!']);
+end
+disp(['R = ' num2str(floor(sum(tmp_sessions.*tmp_m)/L))])
+% max #requests R is related to lc due to feasibility constraint:
+% R = 41 if lc = 100
+% R = 102 if lc = 80
+% R = 115 if lc = 60
+% R = 139 if lc = 40
+% R = 213 if lc = 20
+
+
+% construct logical routing topology:
+[E,V,link,link_list] = construct_routing_topology(n_client,n_server);
+
+%% proposed solution:
+MAX_MILP_SIZE = 10^7; 
+milp_size = (2*n_server + 14*R*E)*(R*E*5+n_server*2); 
+if milp_size <= MAX_MILP_SIZE % only run MILP if the required memory (represented by size of the inequality coefficient matrix) is small enough (set of a billion)
+    [soln_f,soln_a,soln_m,soln_val] = BPRR_MILP_general(n_client,n_server,n_request_client,lc,RTT,tau,L,sm,sc,M,E,V,R,link,link_list);
+    Time_proposed = soln_val/R/lc; % average inference time per token (averaged over all the requests); in 'ms'
+    disp(['Proposed MILP: average time per token = ' num2str(soln_val/R/lc) ' ms'])
+end
+% sanity check: soln_val should be the same
+% [soln_val] = total_inference_time(soln_f,soln_a,soln_m, n_client,n_server,n_request_client,lc,RTT,tau,sm,sc,M,R,link_list);
+% Best objective 1.980000000000e+04, best bound 1.209264224128e+04, gap 38.9260%
+
+% our heuristic for general case:
+[soln_f_heu,soln_a_heu,soln_m_heu,soln_val_heu] = BPRR_heuristic_general(n_client,n_server,n_request_client,lc,RTT,tau,L,sm,sc,M,E,V,R,link,link_list);
+Time_proposed_heu = soln_val_heu/R/lc; % average inference time per token in 'ms'
+disp(['Proposed heuristic: average time per token = ' num2str(soln_val_heu/R/lc) ' ms'])
+
+%% petals:
+% Order = [1:n_local_server n_local_server+1:n_server;...
+%     n_local_server+1:n_server 1:n_local_server];
+runs = 100;
+Time_petals = zeros(2,runs); % Time_petals(1,:): average inference time of Petals in 's'; Time_petals(2,:): average inference time in 's' under the optimal request routing and the block placement by Petals
+% for i_order = 1:size(Order,1)
+%     order = Order(i_order,:);
+for r_indx = 1:runs
+    disp(['run ' num2str(r_indx) ':'])
+    order = randperm(n_server); % servers joining in a random order
+    [soln_f_petals,soln_a_petals,soln_m_petals,soln_val_petals] = Petals(order,throughput,RTT_raw,overhead_delay_petals,alloc_delay,d_model, n_client,n_server,n_request_client,lc,RTT,tau,L,sm,sc,M,E,R,link,link_list);
+    Time_petals(1,r_indx) = soln_val_petals/R/lc; 
+    disp(['when servers join in the order of ' sprintf('%d,', order) ' average time per token = ' num2str(soln_val_petals/R/lc) ' ms'])
+    % ablation study: only optimize request routing under the block
+    % placement given by Petals
+    [soln_f_RR,soln_val_RR] = RR_ILP_general(soln_m_petals,soln_a_petals,  n_client,n_server,n_request_client,lc,RTT,tau,L,sm,sc,M,E,V,R,link,link_list,soln_f_petals);
+    if ~isempty(soln_f_RR)
+        Time_petals(2,r_indx) = soln_val_RR/R/lc;
+        disp(['under the same block placement, average time per token under the optimal RR = ' num2str(soln_val_RR/R/lc) ' ms' newline])
+    else % if the original routing is infeasible:
+        Time_petals(2,r_indx) = Time_petals(1,r_indx); % then keep the routing solution by Petals
+        disp(['Petals routing is infeasible (i.e., cannot run all the sessions concurrently), hence not comparing with ILP routing'])
+    end
+end
+
+% Observation: There are two clusters of inference times for Petals; if the
+% fast server (remote A100) joins early, the inference time is smaller; if it joins
+% late, the inference time is larger. This is because Petals must complete
+% all the blocks at a previous server before going to the next server in
+% chain, so if A100 joins late, it will be placed with later blocks and hence not fully utilized (the first few blocks on it are never used). 
+
+%% plot results:
+
+methods = {'Petals','RR only','CG-BPRR','MILP-BPRR'};
+cmap = {'k','m','r','b'};
+fsize = 16;
+if milp_size <= MAX_MILP_SIZE % if running MILP
+    Time = [Time_petals; Time_proposed_heu*ones(1,runs); Time_proposed*ones(1,runs)];
+    I_methods = 1:4; 
+else % not running MILP
+    Time = [Time_petals; Time_proposed_heu*ones(1,runs)];
+    I_methods = 1:3;
+end
+
+figure;
+hold on;
+for i = I_methods
+    [f,x] = ecdf(Time(i,:));
+    plot(x, f, 'Color', cmap{i}, 'LineStyle', '-', 'LineWidth', 1.5);
+end
+hold off;
+ylabel('CDF','FontSize',fsize)
+xlabel('time per token (ms)','FontSize',fsize)
+legend(methods(I_methods),'FontSize',fsize)
+    saveas(gcf,['plot/CDF_general_case_' model],'epsc')
+    saveas(gcf,['plot/CDF_general_case_' model],'fig')
+
+
+
+
+
+
+%% debug: print out the routing paths (as a sequence of global node indices) under given soln_f:
+solution_f = soln_f_petals; % replace this by any RR solution of interest
+    Path = cell(R,1);
+    for c = 1:n_client
+        for r1 = 1:n_request_client
+            r = (c-1)*n_request_client + r1;
+            links = find(solution_f(:,r));
+            Path{r} = zeros(1,1+length(links));
+            links_list = link_list(links,:);
+            Path{r}(1) = c;
+            for i = 2:length(links)+1
+                Path{r}(i) = links_list(find(links_list(:,1)==Path{r}(i-1)),2);
+            end
+        end
+    end
+%% debug: print out the range of placed blocks per server
+% soln_a_print = soln_a_heu;
+% soln_m_print = soln_m_heu; 
+soln_a_print = soln_a_petals;
+soln_m_print = soln_m_petals; 
+[~,I] = sort(soln_a_print); 
+[soln_a_print(I) soln_a_print(I)+soln_m_print(I)-1]
