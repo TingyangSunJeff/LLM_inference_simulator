@@ -62,8 +62,12 @@ This repository contains MATLAB code for simulating and benchmarking distributed
 
 If you use this simulator in your research, please cite the corresponding paper:
 
-Tingyang Sun, Ting He, Bo Ji, and Parimal Parag. Optimizing Resource Allocation for Geographically-Distributed Inference by Large Language Models. IFIP WG 7.3 Performance, 2025.
-
+@inproceedings{sun2025distributed,
+  title={Optimizing Resource Allocation for Geographically-Distributed Inference by Large Language Models},
+  author={Tingyang Sun, Ting He, Bo Ji and Parimal Parag},
+  booktitle={IFIP WG 7.3 Performance 2025 conference},
+  year={2025}
+}
 
 ## License
 
