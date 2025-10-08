@@ -70,8 +70,7 @@ If you use this simulator in your research, please cite the corresponding paper:
 }
 
 ## License
-
-The license for this simulator code is TBD (to be determined) and will be specified upon release of the camera-ready version of the associated paper. For now, contact the authors for permission to use the code.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
 ## Contact
 
