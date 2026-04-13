@@ -62,11 +62,15 @@ This repository contains MATLAB code for simulating and benchmarking distributed
 
 If you use this simulator in your research, please cite the corresponding paper:
 
-@inproceedings{sun2025distributed,
+@article{sun2026optimizing,
   title={Optimizing Resource Allocation for Geographically-Distributed Inference by Large Language Models},
-  author={Tingyang Sun, Ting He, Bo Ji and Parimal Parag},
-  booktitle={IFIP WG 7.3 Performance 2025 conference},
-  year={2025}
+  author={Sun, Tingyang and He, Ting and Ji, Bo and Parag, Parimal},
+  journal={ACM SIGMETRICS Performance Evaluation Review},
+  volume={53},
+  number={4},
+  pages={12--13},
+  year={2026},
+  publisher={ACM New York, NY, USA}
 }
 
 ## License
